@@ -1,8 +1,15 @@
 import streamlit as st
-from google.genai import errors
 
 import chat_store
-from assistant import MODEL, SYSTEM_PROMPT, create_client, stream_reply
+from assistant import (
+    API_ERRORS,
+    GEMINI_MODEL,
+    GROQ_MODEL,
+    PROVIDERS,
+    SYSTEM_PROMPT,
+    create_client,
+    stream_reply,
+)
 
 st.set_page_config(page_title="LLM Assistant", page_icon="🤖")
 
@@ -72,6 +79,8 @@ STARTERS = [
     ("✍️ Email likho", "Write a short, polite email asking for a deadline extension."),
 ]
 
+MODEL_NAMES = {"Gemini": GEMINI_MODEL, "Groq": GROQ_MODEL}
+
 # ---------- session state ----------
 if "chat_id" not in st.session_state:
     st.session_state.chat_id = chat_store.new_chat_id()
@@ -92,6 +101,16 @@ def open_chat(chat_id: str) -> None:
 
 # ---------- sidebar ----------
 with st.sidebar:
+    st.header("🧠 Model")
+    provider = st.selectbox(
+        "Kon sa model use karna hai?",
+        PROVIDERS,
+        key="provider",
+        label_visibility="collapsed",
+    )
+    st.caption(f"{provider} · {MODEL_NAMES[provider]}")
+
+    st.divider()
     st.header("💬 Chats")
     if st.button("➕ New chat", width="stretch", type="primary"):
         start_new_chat()
@@ -127,10 +146,10 @@ with st.sidebar:
 
 # ---------- client ----------
 try:
-    client = create_client()
+    client = create_client(provider)
 except RuntimeError as exc:
     st.error(str(exc))
-    st.info("Add your rotated Gemini API key to `.env` as `GEMINI_API_KEY`.")
+    st.info(f"`.env` file mai `{provider.upper()}_API_KEY` add karein.")
     st.stop()
 
 # ---------- chat ----------
@@ -143,7 +162,7 @@ if not st.session_state.messages and not prompt:
         f"""
         <div class="hero">
             <h1>🤖 LLM Assistant</h1>
-            <p>Powered by Google Gemini · {MODEL}</p>
+            <p>Powered by {provider} · {MODEL_NAMES[provider]}</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -170,16 +189,17 @@ if prompt:
     with st.chat_message("assistant"):
         try:
             reply = st.write_stream(
-                stream_reply(client, request_messages, system_prompt)
+                stream_reply(client, request_messages, system_prompt, provider)
             )
-        except errors.APIError as exc:
-            if exc.code == 503:
+        except API_ERRORS as exc:
+            code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+            if code in (429, 503):
                 st.error(
-                    "Gemini is still experiencing high demand after automatic "
-                    "retries. Please try again in a little while."
+                    f"{provider} abhi busy hai ya limit khatam ho gayi. "
+                    "Thori der baad dobara try karein, ya sidebar se doosra model chunein."
                 )
             else:
-                st.error(f"Gemini API request failed: {exc}")
+                st.error(f"{provider} API request failed: {exc}")
         else:
             st.session_state.messages.extend(
                 [
