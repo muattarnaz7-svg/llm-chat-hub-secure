@@ -1,5 +1,9 @@
+streamlit>=1.50
 google-genai
-websockets<16
-streamlit
-python-dotenv
 groq
+openai
+python-dotenv
+scikit-learn
+pypdf
+ddgs
+gTTS

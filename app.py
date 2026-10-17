@@ -1,14 +1,18 @@
+import random
+
 import streamlit as st
 
 import chat_store
+import rag
+import voice
 from assistant import (
     API_ERRORS,
-    GEMINI_MODEL,
-    GROQ_MODEL,
     PROVIDERS,
     SYSTEM_PROMPT,
     create_client,
+    model_name,
     stream_reply,
+    supports_images,
 )
 
 st.set_page_config(page_title="LLM Assistant", page_icon="🤖")
@@ -70,21 +74,67 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# Har button ke 3 alag sawal hain, click par random ek chuna jata hai
 STARTERS = [
-    ("💡 Kuch samjhao", "Explain how machine learning works in simple words."),
-    ("💻 Code likho", "Write a Python function that checks if a number is prime."),
-    ("📅 Din plan karo", "Help me plan a productive study day."),
-    ("🗣 Roman Urdu mein", "Mujhe Roman Urdu mein 5 productivity tips do."),
-    ("🚀 Project idea", "Give me 5 beginner ML project ideas for my GitHub."),
-    ("✍️ Email likho", "Write a short, polite email asking for a deadline extension."),
+    (
+        "💡 Kuch samjhao",
+        [
+            "Explain how machine learning works in simple words.",
+            "Explain what an API is, with a simple everyday example.",
+            "Explain how neural networks learn, like I'm a beginner.",
+        ],
+    ),
+    (
+        "💻 Code likho",
+        [
+            "Write a Python function that checks if a number is prime.",
+            "Write a Python function that reverses a string without slicing.",
+            "Write a Python script that counts word frequency in a text file.",
+        ],
+    ),
+    (
+        "📅 Din plan karo",
+        [
+            "Help me plan a productive study day.",
+            "Make me a simple weekly routine for learning Python and ML.",
+            "Plan a 2-hour focused work session with short breaks.",
+        ],
+    ),
+    (
+        "🗣 Roman Urdu mein",
+        [
+            "Mujhe Roman Urdu mein 5 productivity tips do.",
+            "Roman Urdu mein batao ke AI aur ML mein kya farq hai.",
+            "Roman Urdu mein mujhe ek chhoti motivational kahani sunao.",
+        ],
+    ),
+    (
+        "🚀 Project idea",
+        [
+            "Give me 5 beginner ML project ideas for my GitHub.",
+            "Suggest 5 NLP mini projects I can finish in a weekend.",
+            "Give me 5 Streamlit app ideas that would look good in a portfolio.",
+        ],
+    ),
+    (
+        "✍️ Email likho",
+        [
+            "Write a short, polite email asking for a deadline extension.",
+            "Write a professional email introducing myself to a recruiter.",
+            "Write a short email following up on a job application.",
+        ],
+    ),
 ]
 
-MODEL_NAMES = {"Gemini": GEMINI_MODEL, "Groq": GROQ_MODEL}
+TTS_LANGUAGES = {"English": "en", "Urdu": "ur", "Hindi": "hi"}
+IMAGE_TYPES = ["png", "jpg", "jpeg", "webp"]
 
 # ---------- session state ----------
 if "chat_id" not in st.session_state:
     st.session_state.chat_id = chat_store.new_chat_id()
     st.session_state.messages = []
+st.session_state.setdefault("voice_n", 0)  # recording widget reset karne ke liye
+st.session_state.setdefault("image_n", 0)  # image uploader reset karne ke liye
 
 
 def start_new_chat() -> None:
@@ -108,7 +158,7 @@ with st.sidebar:
         key="provider",
         label_visibility="collapsed",
     )
-    st.caption(f"{provider} · {MODEL_NAMES[provider]}")
+    st.caption(f"{provider} · {model_name(provider)}")
 
     st.divider()
     st.header("💬 Chats")
@@ -137,6 +187,63 @@ with st.sidebar:
             st.rerun()
 
     st.divider()
+    st.header("🧰 Features")
+
+    use_tools = st.toggle(
+        "🔧 Tools (calculator + web search)",
+        help="Model zaroorat par calculator ya web search khud chalayega.",
+    )
+
+    with st.expander("🖼 Image"):
+        image_file = st.file_uploader(
+            "Agle sawal ke saath image bhejein",
+            type=IMAGE_TYPES,
+            key=f"image_{st.session_state.image_n}",
+        )
+        if image_file:
+            st.image(image_file, width=160)
+            if not supports_images(provider):
+                st.warning(
+                    f"{provider} images support nahi karta. "
+                    "Gemini ya Groq chunein."
+                )
+
+    with st.expander("📄 Documents (RAG)"):
+        doc_files = st.file_uploader(
+            "PDF / TXT / MD upload karein",
+            type=["pdf", "txt", "md"],
+            accept_multiple_files=True,
+            key="docs",
+        )
+        docs_key = tuple((f.name, f.size) for f in doc_files)
+        if docs_key != st.session_state.get("docs_key"):
+            if doc_files:
+                with st.spinner("Documents index ho rahe hain..."):
+                    st.session_state.doc_index = rag.DocIndex(
+                        [(f.name, f.getvalue()) for f in doc_files]
+                    )
+            else:
+                st.session_state.doc_index = None
+            st.session_state.docs_key = docs_key
+
+        doc_index = st.session_state.get("doc_index")
+        if doc_files and doc_index is not None:
+            if doc_index.chunks:
+                st.caption(f"📚 {len(doc_index.chunks)} hisse tayyar, ab sawal poochein.")
+            else:
+                st.warning(
+                    "In files mein text nahi mila (shayad scanned PDF hai)."
+                )
+
+    with st.expander("🎤 Voice"):
+        voice_clip = st.audio_input(
+            "Bol kar poochein", key=f"voice_{st.session_state.voice_n}"
+        )
+        speak_reply = st.toggle("🔊 Jawab bolkar sunao")
+        tts_language = st.selectbox("Awaaz ki zubaan", list(TTS_LANGUAGES))
+        st.caption("Voice input ke liye GROQ_API_KEY zaroori hai.")
+
+    st.divider()
     with st.expander("⚙️ Settings"):
         system_prompt = st.text_area(
             "Assistant personality",
@@ -157,28 +264,55 @@ prompt = st.chat_input("Ask me anything...") or st.session_state.pop(
     "pending_prompt", None
 )
 
+# Voice: nayi recording ho to usay text mein badal kar prompt bana do
+if voice_clip is not None and not prompt:
+    try:
+        with st.spinner("Awaaz sun raha hoon..."):
+            prompt = voice.transcribe(create_client("Groq"), voice_clip.getvalue())
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Voice samajh nahi aayi: {exc}")
+    finally:
+        st.session_state.voice_n += 1  # agli baar recording widget khali ho jaye
+    prompt = prompt or None
+
 if not st.session_state.messages and not prompt:
     st.markdown(
         f"""
         <div class="hero">
             <h1>🤖 LLM Assistant</h1>
-            <p>Powered by {provider} · {MODEL_NAMES[provider]}</p>
+            <p>Powered by {provider} · {model_name(provider)}</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
     cols = st.columns(2)
-    for i, (label, text) in enumerate(STARTERS):
+    for i, (label, variants) in enumerate(STARTERS):
         if cols[i % 2].button(label, key=f"starter_{i}", width="stretch"):
-            st.session_state.pending_prompt = text
+            st.session_state.pending_prompt = random.choice(variants)
             st.rerun()
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
+# Pichle jawab ki awaaz (agar "Jawab bolkar sunao" on tha)
+if "tts_audio" in st.session_state:
+    st.audio(st.session_state.pop("tts_audio"), format="audio/mp3", autoplay=True)
+if "tts_error" in st.session_state:
+    st.caption(f"🔇 Awaaz nahi ban saki: {st.session_state.pop('tts_error')}")
+
 if prompt:
+    # Image sirf isi sawal ke saath jati hai
+    image = None
+    if image_file:
+        if supports_images(provider):
+            image = (image_file.getvalue(), image_file.type or "image/png")
+        else:
+            st.warning(f"{provider} images support nahi karta, image nahi bheji gayi.")
+
     with st.chat_message("user"):
+        if image:
+            st.image(image[0], width=240)
         st.markdown(prompt)
 
     request_messages = [
@@ -186,10 +320,25 @@ if prompt:
         {"role": "user", "content": prompt},
     ]
 
+    # RAG: relevant document hisse is sawal ke system prompt mein jodo
+    effective_system = system_prompt
+    index = st.session_state.get("doc_index")
+    if index is not None and index.chunks:
+        context = rag.build_context(index, prompt)
+        if context:
+            effective_system = f"{system_prompt}\n\n{context}"
+
     with st.chat_message("assistant"):
         try:
             reply = st.write_stream(
-                stream_reply(client, request_messages, system_prompt, provider)
+                stream_reply(
+                    client,
+                    request_messages,
+                    effective_system,
+                    provider,
+                    image=image,
+                    use_tools=use_tools,
+                )
             )
         except API_ERRORS as exc:
             code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
@@ -201,13 +350,26 @@ if prompt:
             else:
                 st.error(f"{provider} API request failed: {exc}")
         else:
+            # History mein image ke bytes nahi, sirf nishani save hoti hai
+            saved_prompt = f"🖼 [image attached] {prompt}" if image else prompt
             st.session_state.messages.extend(
                 [
-                    {"role": "user", "content": prompt},
+                    {"role": "user", "content": saved_prompt},
                     {"role": "assistant", "content": reply},
                 ]
             )
             chat_store.save_chat(
                 st.session_state.chat_id, st.session_state.messages
             )
+            if image:
+                st.session_state.image_n += 1  # uploader khali karo
+
+            if speak_reply:
+                try:
+                    st.session_state.tts_audio = voice.speak(
+                        reply, TTS_LANGUAGES[tts_language]
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    st.session_state.tts_error = str(exc)
+
             st.rerun()  # refresh sidebar so the chat title appears
