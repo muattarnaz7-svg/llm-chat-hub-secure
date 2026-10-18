@@ -2,6 +2,7 @@ import random
 
 import streamlit as st
 
+import auth
 import chat_store
 import rag
 import voice
@@ -64,6 +65,18 @@ st.markdown(
         border-color: rgba(255, 255, 255, 0.45);
         background: rgba(255, 255, 255, 0.1);
         color: #ffffff;
+    }
+
+    /* chat ke avatar icons chhupao */
+    [data-testid="stChatMessageAvatarUser"],
+    [data-testid="stChatMessageAvatarAssistant"],
+    [data-testid="stChatMessageAvatarCustom"] { display: none; }
+
+    .chips { text-align: center; margin: 0.4rem 0 1.6rem; }
+    .chips span {
+        display: inline-block; margin: 0.25rem 0.2rem; padding: 0.3rem 0.8rem;
+        border: 1px solid rgba(255, 255, 255, 0.16); border-radius: 999px;
+        background: rgba(255, 255, 255, 0.04); color: #cfcfd6; font-size: 0.85rem;
     }
 
     .hero { text-align: center; margin: 2.5rem 0 1.5rem; }
@@ -129,20 +142,140 @@ STARTERS = [
 TTS_LANGUAGES = {"English": "en", "Urdu": "ur", "Hindi": "hi"}
 IMAGE_TYPES = ["png", "jpg", "jpeg", "webp"]
 
+# ---------- login (email + secret code) ----------
+def log_in(email: str) -> None:
+    for key in ("auth_step", "auth_email"):
+        st.session_state.pop(key, None)
+    st.session_state.user_email = email
+    st.session_state.user_prefix = auth.user_prefix(email)
+    st.rerun()
+
+
+def render_login() -> None:
+    # Login screen par sidebar nahi dikhana
+    st.markdown(
+        "<style>[data-testid='stSidebar'], [data-testid='stSidebarCollapsedControl']"
+        " { display: none; }</style>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        """
+        <div class="hero">
+            <h1>🤖 LLM Chat Hub</h1>
+            <p>Apna AI assistant, sirf aap ke secret code ke peeche.</p>
+        </div>
+        <div class="chips">
+            <span>🧠 Gemini + Groq</span><span>🖼 Image</span><span>📄 PDF par sawal</span>
+            <span>🎤 Voice</span><span>🔧 Tools</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    _, middle, _ = st.columns([1, 2, 1])
+    with middle, st.container(border=True):
+        step = st.session_state.get("auth_step", "email")
+
+        if step == "email":
+            st.subheader("👋 Welcome")
+            with st.form("email_form"):
+                email = st.text_input(
+                    "Apna email likhein", placeholder="name@example.com", key="login_email"
+                )
+                go = st.form_submit_button("Continue →", type="primary")
+            if go:
+                email = auth.normalize_email(email)
+                if auth.is_valid_email(email):
+                    st.session_state.auth_email = email
+                    st.session_state.auth_step = "code"
+                    st.rerun()
+                else:
+                    st.error("Sahi email likhein, jaise name@example.com")
+            return
+
+        email = st.session_state.auth_email
+        st.caption(f"📧 {email}")
+
+        if auth.user_exists(email):
+            st.subheader("🔑 Enter your code")
+            with st.form("unlock_form"):
+                code = st.text_input("Aap ka secret code", type="password", key="unlock_code")
+                go = st.form_submit_button("Unlock 🔓", type="primary")
+            if go:
+                ok, message = auth.verify(email, code)
+                if ok:
+                    log_in(email)
+                else:
+                    st.error(message)
+        else:
+            st.subheader("✨ Apna secret code banayein")
+            st.caption(
+                "Ye aap ki pehli baar hai. Ye code sirf aap ko pata hona chahiye: "
+                "har baar app kholne par yahi poocha jayega."
+            )
+            with st.form("signup_form"):
+                code = st.text_input(
+                    f"Naya secret code (kam az kam {auth.MIN_CODE_LENGTH} characters)",
+                    type="password",
+                    key="new_code",
+                )
+                confirm = st.text_input(
+                    "Code dobara likhein", type="password", key="confirm_code"
+                )
+                invite = (
+                    st.text_input("Invite code", type="password", key="invite_code")
+                    if auth.signup_code_required()
+                    else ""
+                )
+                go = st.form_submit_button("Account banayein ✨", type="primary")
+            if go:
+                if code != confirm:
+                    st.error("Dono codes ek jaise nahi hain.")
+                else:
+                    ok, message = auth.register(email, code, invite)
+                    if ok:
+                        log_in(email)
+                    else:
+                        st.error(message)
+
+        if st.button("← Email badlein"):
+            st.session_state.pop("auth_step", None)
+            st.session_state.pop("auth_email", None)
+            st.rerun()
+
+
+if "user_email" not in st.session_state:
+    render_login()
+    st.stop()
+
+USER_PREFIX = st.session_state.user_prefix
+
+
 # ---------- session state ----------
+# Har user ki chats ke ids uske prefix se shuru hote hain, is liye sirf apni chats dikhti hain
+def new_chat_id() -> str:
+    return f"{USER_PREFIX}{chat_store.new_chat_id()}"
+
+
+def user_chats() -> list[dict]:
+    return [c for c in chat_store.list_chats() if c["id"].startswith(USER_PREFIX)]
+
+
 if "chat_id" not in st.session_state:
-    st.session_state.chat_id = chat_store.new_chat_id()
+    st.session_state.chat_id = new_chat_id()
     st.session_state.messages = []
 st.session_state.setdefault("voice_n", 0)  # recording widget reset karne ke liye
 st.session_state.setdefault("image_n", 0)  # image uploader reset karne ke liye
 
 
 def start_new_chat() -> None:
-    st.session_state.chat_id = chat_store.new_chat_id()
+    st.session_state.chat_id = new_chat_id()
     st.session_state.messages = []
 
 
 def open_chat(chat_id: str) -> None:
+    if not chat_id.startswith(USER_PREFIX):
+        return
     data = chat_store.load_chat(chat_id)
     if data:
         st.session_state.chat_id = chat_id
@@ -151,6 +284,12 @@ def open_chat(chat_id: str) -> None:
 
 # ---------- sidebar ----------
 with st.sidebar:
+    st.caption(f"👤 {st.session_state.user_email}")
+    if st.button("🔒 Lock / Logout", width="stretch"):
+        st.session_state.clear()  # sab kuch saaf, agli baar phir code poocha jayega
+        st.rerun()
+
+    st.divider()
     st.header("🧠 Model")
     provider = st.selectbox(
         "Kon sa model use karna hai?",
@@ -166,7 +305,7 @@ with st.sidebar:
         start_new_chat()
         st.rerun()
 
-    saved = chat_store.list_chats()
+    saved = user_chats()
     if not saved:
         st.caption("Abhi koi saved chat nahi hai.")
     for chat in saved:
@@ -367,7 +506,7 @@ if prompt:
             if speak_reply:
                 try:
                     st.session_state.tts_audio = voice.speak(
-                        reply, TTS_LANGUAGES[tts_language]
+                        str(reply), TTS_LANGUAGES[tts_language]
                     )
                 except Exception as exc:  # noqa: BLE001
                     st.session_state.tts_error = str(exc)
